@@ -5,8 +5,8 @@ export default function SummaryCard({ summary, onShare }) {
     summary.netA === 0
       ? "All settled up"
       : summary.netA > 0
-      ? `User B owes User A ${formatCurrency(summary.netA)}`
-      : `User A owes User B ${formatCurrency(Math.abs(summary.netA))}`;
+      ? `Aaryaman owes Banga ${formatCurrency(summary.netA)}`
+      : `Banga owes Aaryaman ${formatCurrency(Math.abs(summary.netA))}`;
 
   const balanceColor =
     summary.netA === 0 ? "text-slate-300" : summary.netA > 0 ? "text-mint" : "text-flame";
@@ -30,19 +30,19 @@ export default function SummaryCard({ summary, onShare }) {
 
       <div className="mt-6 grid gap-3 rounded-2xl border border-slate-800 bg-slate-950/40 p-4 text-sm">
         <div className="flex items-center justify-between">
-          <span className="text-slate-400">User A paid</span>
+          <span className="text-slate-400">Banga paid</span>
           <span className="font-semibold text-slate-100">{formatCurrency(summary.paidA)}</span>
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-slate-400">User B paid</span>
+          <span className="text-slate-400">Aaryaman paid</span>
           <span className="font-semibold text-slate-100">{formatCurrency(summary.paidB)}</span>
         </div>
         <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>Fair share (A)</span>
+          <span>Fair share (Banga)</span>
           <span>{formatCurrency(summary.owedA)}</span>
         </div>
         <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>Fair share (B)</span>
+          <span>Fair share (Aaryaman)</span>
           <span>{formatCurrency(summary.owedB)}</span>
         </div>
       </div>
