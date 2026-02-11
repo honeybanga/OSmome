@@ -24,7 +24,40 @@ const isLikelyTotalLine = (line) => {
 
 const cleanAmountToken = (token) => token.replace(/[₹,]/g, "");
 
-const parseOcrLines = (text) => {
+const FEE_KEYWORDS = [
+  "delivery",
+  "surge",
+  "handling",
+  "fee",
+  "packaging",
+  "platform",
+  "tip",
+  "tax",
+  "gst",
+  "saving",
+  "saved",
+  "discount",
+  "coupon",
+  "promo",
+];
+
+const shouldIgnoreLine = (line, ignoreFees) => {
+  if (!ignoreFees) return false;
+  const lower = line.toLowerCase();
+  return FEE_KEYWORDS.some((word) => lower.includes(word));
+};
+
+const getTotalScore = (line) => {
+  const lower = line.toLowerCase();
+  if (lower.includes("total bill")) return 4;
+  if (lower.includes("to pay") || lower.includes("amount due") || lower.includes("payable")) return 4;
+  if (lower.includes("grand total")) return 3;
+  if (lower.includes("item total")) return 2;
+  if (lower.includes("total")) return 1;
+  return 0;
+};
+
+const parseOcrLines = (text, { totalOnly, ignoreFees }) => {
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -35,7 +68,10 @@ const parseOcrLines = (text) => {
 
   for (const line of lines) {
     const lower = line.toLowerCase();
-    if (lower.includes("saving") || lower.includes("saved")) {
+    if (shouldIgnoreLine(line, ignoreFees)) {
+      continue;
+    }
+    if (lower.includes("free")) {
       continue;
     }
 
@@ -49,14 +85,63 @@ const parseOcrLines = (text) => {
 
     const label = line.replace(last, "").replace(/\s{2,}/g, " ").trim();
 
-    items.push({ line, label: label || line, amount });
-    if (isLikelyTotalLine(line)) {
-      totals.push({ line, amount });
+    const isTotal = isLikelyTotalLine(line);
+    if (!totalOnly || isTotal) {
+      items.push({ line, label: label || line, amount });
+    }
+    if (isTotal) {
+      totals.push({ line, amount, score: getTotalScore(line) });
     }
   }
 
   return { items, totals };
 };
+
+const preprocessImage = (file) =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = () => {
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    img.onload = () => {
+      const maxWidth = 1400;
+      const scale = Math.min(1, maxWidth / img.width);
+      const width = Math.floor(img.width * scale);
+      const height = Math.floor(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas not supported"));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      const imageData = ctx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+
+      // Grayscale + contrast + threshold
+      const contrast = 1.35;
+      const threshold = 160;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        gray = (gray - 128) * contrast + 128;
+        const value = gray > threshold ? 255 : 0;
+        data[i] = value;
+        data[i + 1] = value;
+        data[i + 2] = value;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 
 export default function ExpenseForm({ onAddExpense }) {
   const [form, setForm] = useState(initialState);
@@ -65,6 +150,9 @@ export default function ExpenseForm({ onAddExpense }) {
   const [ocrStatus, setOcrStatus] = useState("");
   const [ocrItems, setOcrItems] = useState([]);
   const [ocrTotal, setOcrTotal] = useState(null);
+  const [ocrPreview, setOcrPreview] = useState("");
+  const [totalOnly, setTotalOnly] = useState(true);
+  const [ignoreFees, setIgnoreFees] = useState(true);
 
   const detectedCategory = useMemo(() => inferCategory(form.itemName), [form.itemName]);
 
@@ -114,6 +202,7 @@ export default function ExpenseForm({ onAddExpense }) {
     setOcrItems([]);
     setOcrTotal(null);
     setOcrStatus("");
+    setOcrPreview("");
   };
 
   const handleScanReceipt = async () => {
@@ -127,18 +216,24 @@ export default function ExpenseForm({ onAddExpense }) {
 
     try {
       const { recognize } = await import("tesseract.js");
-      setOcrStatus("Scanning receipt...");
+      setOcrStatus("Preprocessing image...");
+      const prepared = await preprocessImage(receiptFile);
+      setOcrPreview(prepared);
 
-      const result = await recognize(receiptFile, "eng", {
+      setOcrStatus("Scanning receipt...");
+      const result = await recognize(prepared, "eng", {
         workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js",
         corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@5/tesseract-core.wasm.js",
         langPath: "https://tessdata.projectnaptha.com/4.0.0",
       });
 
       const text = result.data.text || "";
-      const { items, totals } = parseOcrLines(text);
+      const { items, totals } = parseOcrLines(text, { totalOnly, ignoreFees });
       const maxTotal = totals.length
-        ? totals[totals.length - 1].amount
+        ? totals
+            .slice()
+            .sort((a, b) => b.score - a.score || a.line.localeCompare(b.line))
+            .slice(0, 1)[0].amount
         : items.length
         ? Math.max(...items.map((entry) => entry.amount))
         : null;
@@ -288,7 +383,34 @@ export default function ExpenseForm({ onAddExpense }) {
             ) : null}
           </div>
 
+          <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-300">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={totalOnly}
+                onChange={(event) => setTotalOnly(event.target.checked)}
+              />
+              Total only
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={ignoreFees}
+                onChange={(event) => setIgnoreFees(event.target.checked)}
+              />
+              Ignore fees/discounts
+            </label>
+          </div>
+
           {ocrStatus ? <p className="mt-2 text-xs text-emerald-200">{ocrStatus}</p> : null}
+
+          {ocrPreview ? (
+            <img
+              src={ocrPreview}
+              alt="Preprocessed receipt preview"
+              className="mt-3 w-full rounded-xl border border-slate-800"
+            />
+          ) : null}
 
           {ocrItems.length ? (
             <div className="mt-3 space-y-2">
