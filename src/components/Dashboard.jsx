@@ -9,7 +9,14 @@ const PROVIDER_META = {
   Other: { label: "Other", color: "bg-slate-400" },
 };
 
-export default function Dashboard({ summary, expenses, monthLabel, categoryTotals, providerTotals }) {
+export default function Dashboard({
+  summary,
+  expenses,
+  monthLabel,
+  categoryTotals,
+  providerTotals,
+  monthlyTotals,
+}) {
   const topCategories = [...categoryTotals]
     .sort((a, b) => b.total - a.total)
     .slice(0, 5);
@@ -17,6 +24,10 @@ export default function Dashboard({ summary, expenses, monthLabel, categoryTotal
   const topProviders = [...providerTotals]
     .sort((a, b) => b.total - a.total)
     .slice(0, 5);
+
+  const maxMonthTotal = monthlyTotals.length
+    ? Math.max(...monthlyTotals.map((item) => item.total))
+    : 0;
 
   return (
     <section className="glass rounded-3xl p-6 shadow-soft">
@@ -60,6 +71,37 @@ export default function Dashboard({ summary, expenses, monthLabel, categoryTotal
       </div>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+          <p className="text-xs uppercase tracking-wide text-slate-400">Monthly Spend</p>
+          <div className="mt-4 flex items-end gap-3">
+            {monthlyTotals.length === 0 ? (
+              <p className="text-sm text-slate-400">No monthly data yet.</p>
+            ) : (
+              monthlyTotals.map((month) => (
+                <div key={month.key} className="flex flex-1 flex-col items-center gap-2">
+                  <div className="flex h-28 w-full items-end rounded-full bg-slate-900 p-1">
+                    <div
+                      className="w-full rounded-full bg-emerald-400"
+                      style={{
+                        height: `${Math.max(
+                          8,
+                          Math.round((month.total / (maxMonthTotal || 1)) * 100)
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="text-[10px] uppercase tracking-wide text-slate-400">
+                    {month.label}
+                  </span>
+                  <span className="text-[11px] font-semibold text-slate-100">
+                    {formatCurrency(month.total)}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
         <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
           <p className="text-xs uppercase tracking-wide text-slate-400">Top Categories</p>
           <div className="mt-3 space-y-3">

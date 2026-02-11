@@ -4,8 +4,10 @@ import History from "./components/History.jsx";
 import SummaryCard from "./components/SummaryCard.jsx";
 import Dashboard from "./components/Dashboard.jsx";
 import { inferCategory } from "./utils/categorize.js";
+import { supabase } from "./utils/supabaseClient.js";
 
 const STORAGE_KEY = "grocery-splitter-expenses";
+const ROOM_KEY = "grocery-splitter-room";
 const DEFAULT_PROVIDER = "Local";
 
 const seedExpenses = [
@@ -98,8 +100,19 @@ const formatMonthLabel = (monthKey) => {
   return date.toLocaleString("en-IN", { month: "long", year: "numeric" });
 };
 
+const getMonthLabelShort = (monthKey) => {
+  const [year, month] = monthKey.split("-");
+  const date = new Date(Number(year), Number(month) - 1, 1);
+  return date.toLocaleString("en-IN", { month: "short" });
+};
+
 export default function App() {
   const [view, setView] = useState("entry");
+  const [roomCode, setRoomCode] = useState(() => localStorage.getItem(ROOM_KEY) ?? "");
+  const [roomInput, setRoomInput] = useState(roomCode);
+  const [roomLocked, setRoomLocked] = useState(() => localStorage.getItem(`${ROOM_KEY}-locked`) === "true");
+  const [syncStatus, setSyncStatus] = useState("Local only");
+  const [syncError, setSyncError] = useState("");
   const [expenses, setExpenses] = useState(() => {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return seedExpenses;
@@ -114,6 +127,82 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(expenses));
   }, [expenses]);
+
+  useEffect(() => {
+    if (roomCode) {
+      localStorage.setItem(ROOM_KEY, roomCode);
+    } else {
+      localStorage.removeItem(ROOM_KEY);
+    }
+  }, [roomCode]);
+
+  useEffect(() => {
+    localStorage.setItem(`${ROOM_KEY}-locked`, roomLocked ? "true" : "false");
+  }, [roomLocked]);
+
+  useEffect(() => {
+    if (!supabase || !roomCode) {
+      setSyncStatus(supabase ? "Enter a room code to sync" : "Supabase not configured");
+      return undefined;
+    }
+
+    let cancelled = false;
+    setSyncError("");
+    setSyncStatus("Syncing...");
+
+    const load = async () => {
+      const { data, error } = await supabase
+        .from("expenses")
+        .select("*")
+        .eq("room_code", roomCode)
+        .order("date", { ascending: false })
+        .order("created_at", { ascending: false });
+
+      if (cancelled) return;
+
+      if (error) {
+        setSyncError("Cloud sync failed. Check your room code and Supabase setup.");
+        setSyncStatus("Sync error");
+        return;
+      }
+
+      setExpenses((data ?? []).map(normalizeExpense));
+      setSyncStatus("Synced");
+    };
+
+    load();
+
+    const channel = supabase
+      .channel(`room-${roomCode}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "expenses", filter: `room_code=eq.${roomCode}` },
+        (payload) => {
+          if (!payload) return;
+          setExpenses((prev) => {
+            if (payload.eventType === "INSERT") {
+              const next = [normalizeExpense(payload.new), ...prev];
+              return next;
+            }
+            if (payload.eventType === "UPDATE") {
+              return prev.map((expense) =>
+                expense.id === payload.new.id ? normalizeExpense(payload.new) : expense
+              );
+            }
+            if (payload.eventType === "DELETE") {
+              return prev.filter((expense) => expense.id !== payload.old.id);
+            }
+            return prev;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [roomCode]);
 
   const summary = useMemo(() => computeSummary(expenses), [expenses]);
 
@@ -159,16 +248,63 @@ export default function App() {
     return Array.from(totals.entries()).map(([name, total]) => ({ name, total }));
   }, [monthExpenses]);
 
-  const handleAddExpense = (expense) => {
+  const monthlyTotals = useMemo(() => {
+    const totals = new Map();
+    for (const expense of expenses) {
+      const key = getMonthKey(expense.date);
+      totals.set(key, (totals.get(key) ?? 0) + expense.amount);
+    }
+    const list = Array.from(totals.entries())
+      .map(([key, total]) => ({
+        key,
+        total,
+        label: getMonthLabelShort(key),
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+    return list.slice(-6);
+  }, [expenses]);
+
+  const handleAddExpense = async (expense) => {
     setExpenses((prev) => [expense, ...prev]);
+
+    if (!supabase || !roomCode) return;
+
+    const { error } = await supabase.from("expenses").insert({
+      ...expense,
+      room_code: roomCode,
+    });
+
+    if (error) {
+      setSyncError("Cloud insert failed. Check your connection.");
+    }
   };
 
-  const handleDeleteExpense = (id) => {
+  const handleDeleteExpense = async (id) => {
     setExpenses((prev) => prev.filter((expense) => expense.id !== id));
+
+    if (!supabase || !roomCode) return;
+
+    const { error } = await supabase
+      .from("expenses")
+      .delete()
+      .eq("id", id)
+      .eq("room_code", roomCode);
+
+    if (error) {
+      setSyncError("Cloud delete failed. Check your connection.");
+    }
   };
 
-  const handleClearAll = () => {
+  const handleClearAll = async () => {
     setExpenses([]);
+
+    if (!supabase || !roomCode) return;
+
+    const { error } = await supabase.from("expenses").delete().eq("room_code", roomCode);
+
+    if (error) {
+      setSyncError("Cloud clear failed. Check your connection.");
+    }
   };
 
   const shareSummary = () => {
@@ -185,6 +321,11 @@ export default function App() {
 
     const url = `whatsapp://send?text=${encodeURIComponent(text)}`;
     window.open(url, "_blank");
+  };
+
+  const handleRoomSave = () => {
+    const trimmed = roomInput.trim();
+    setRoomCode(trimmed);
   };
 
   return (
@@ -221,6 +362,34 @@ export default function App() {
                 Dashboard
               </button>
             </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-xs text-slate-300">
+            <span className="uppercase tracking-wide text-slate-500">Room Code</span>
+            <input
+              value={roomInput}
+              onChange={(event) => setRoomInput(event.target.value)}
+              disabled={roomLocked}
+              className="w-40 rounded-full border border-slate-700 bg-slate-900/60 px-3 py-2 text-xs text-slate-100 focus:border-emerald-400 focus:outline-none"
+              placeholder="e.g. banga-aaryaman"
+            />
+            <button
+              type="button"
+              onClick={handleRoomSave}
+              disabled={roomLocked}
+              className="rounded-full border border-emerald-400/40 px-3 py-2 text-xs font-semibold text-emerald-200 transition hover:border-emerald-300"
+            >
+              Save Room
+            </button>
+            <button
+              type="button"
+              onClick={() => setRoomLocked((prev) => !prev)}
+              className="rounded-full border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:border-slate-400"
+            >
+              {roomLocked ? "Unlock" : "Lock"}
+            </button>
+            <span className="text-slate-400">Status: {syncStatus}</span>
+            {syncError ? <span className="text-rose-300">{syncError}</span> : null}
           </div>
 
           {view === "dashboard" ? (
@@ -266,6 +435,7 @@ export default function App() {
             monthLabel={formatMonthLabel(activeMonth)}
             categoryTotals={categoryTotals}
             providerTotals={providerTotals}
+            monthlyTotals={monthlyTotals}
           />
         )}
       </div>
